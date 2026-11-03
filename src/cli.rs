@@ -4,6 +4,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::cmds;
 use crate::error::{Error, Result};
 use crate::object::{hash_object, Kind, Object};
 use crate::repo::Repo;
@@ -26,6 +27,14 @@ Commands:
   init [-b <branch>] [<dir>]       create an empty repository
   hash-object [-w] [-t <type>] (--stdin | <file>...)
   cat-file (-t | -s | -p | -e | <type>) <object>
+  add [-A | -u] [--] <path>...     stage files, directories and deletions
+  rm [-r] [-f] [--cached] <path>...
+  ls-files [-s] [<path>...]        list tracked files
+  write-tree                       write the index as a tree object
+  commit [-a] [--allow-empty] -m <message>
+  log [--oneline] [-n <N>] [<rev>...]
+  rev-parse [--short[=N]] <rev>... also --show-toplevel, --git-dir
+  config [--list | <key> [<value>]]
 ";
 
 /// Run one command line and return the process exit code.
@@ -38,6 +47,14 @@ pub fn run(args: &[String], ctx: &mut Ctx<'_>) -> Result<i32> {
         "init" => cmd_init(rest, ctx),
         "hash-object" => cmd_hash_object(rest, ctx),
         "cat-file" => cmd_cat_file(rest, ctx),
+        "add" => cmds::add(rest, ctx),
+        "rm" => cmds::rm(rest, ctx),
+        "ls-files" => cmds::ls_files(rest, ctx),
+        "write-tree" => cmds::write_tree(rest, ctx),
+        "commit" => cmds::commit(rest, ctx),
+        "log" => cmds::log(rest, ctx),
+        "rev-parse" => cmds::rev_parse(rest, ctx),
+        "config" => cmds::config(rest, ctx),
         "help" | "--help" | "-h" => {
             write!(ctx.out, "{USAGE}")?;
             Ok(0)
@@ -50,12 +67,12 @@ pub fn run(args: &[String], ctx: &mut Ctx<'_>) -> Result<i32> {
     }
 }
 
-fn usage_error(ctx: &mut Ctx<'_>, line: &str) -> Result<i32> {
+pub(crate) fn usage_error(ctx: &mut Ctx<'_>, line: &str) -> Result<i32> {
     writeln!(ctx.err, "usage: nanogit {line}")?;
     Ok(129)
 }
 
-fn resolve_path(cwd: &Path, arg: &str) -> PathBuf {
+pub(crate) fn resolve_path(cwd: &Path, arg: &str) -> PathBuf {
     let p = Path::new(arg);
     if p.is_absolute() {
         p.to_path_buf()

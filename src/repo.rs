@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::object::{Oid, ObjectStore};
+use crate::object::ObjectStore;
 
 /// An opened repository.
 #[derive(Clone, Debug)]
@@ -66,11 +66,6 @@ impl Repo {
     /// The loose object store.
     pub fn odb(&self) -> ObjectStore {
         ObjectStore::new(self.git_dir.join("objects"))
-    }
-
-    /// Resolve a full or abbreviated hexadecimal object name.
-    pub fn rev_parse(&self, spec: &str) -> Result<Oid> {
-        self.odb().resolve_prefix(spec)
     }
 }
 

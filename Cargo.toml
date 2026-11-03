@@ -1,0 +1,19 @@
+[package]
+name = "nanogit"
+version = "0.1.0"
+edition = "2021"
+description = "A Git-compatible mini version control system written from scratch in Rust (std only)"
+license = "MIT"
+readme = "README.md"
+publish = false
+
+[lib]
+name = "nanogit"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nanogit"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3

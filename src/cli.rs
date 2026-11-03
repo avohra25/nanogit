@@ -4,10 +4,13 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::checkout;
 use crate::cmds;
 use crate::error::{Error, Result};
 use crate::object::{hash_object, Kind, Object};
 use crate::repo::Repo;
+use crate::difftool;
+use crate::status;
 
 /// Everything a command needs from its environment.
 pub struct Ctx<'a> {
@@ -27,12 +30,17 @@ Commands:
   init [-b <branch>] [<dir>]       create an empty repository
   hash-object [-w] [-t <type>] (--stdin | <file>...)
   cat-file (-t | -s | -p | -e | <type>) <object>
-  add [-A | -u] [--] <path>...     stage files, directories and deletions
+  add [-A | -u] [-f] [--] <path>...  stage files, directories and deletions
   rm [-r] [-f] [--cached] <path>...
-  ls-files [-s] [<path>...]        list tracked files
+  ls-files [-s] [-o] [-i] [--exclude-standard] [<path>...]
+  check-ignore [-q] <path>...      show which paths .gitignore excludes
+  status [-s | --porcelain] [-b]   show the working tree status
+  branch [-v] [<name> [<start>]] | -d/-D <name> | -m [<old>] <new>
+  checkout [-f] [-b <new>] [--detach] <branch|commit>  |  checkout [<commit>] -- <path>...
+  diff [--cached] [-U<n>] [--name-only | --name-status] [<commit> [<commit>]] [--] [<path>...]
   write-tree                       write the index as a tree object
   commit [-a] [--allow-empty] -m <message>
-  log [--oneline] [-n <N>] [<rev>...]
+  log [--oneline] [--all] [-n <N>] [<rev>...]
   rev-parse [--short[=N]] <rev>... also --show-toplevel, --git-dir
   config [--list | <key> [<value>]]
 ";
@@ -53,6 +61,11 @@ pub fn run(args: &[String], ctx: &mut Ctx<'_>) -> Result<i32> {
         "write-tree" => cmds::write_tree(rest, ctx),
         "commit" => cmds::commit(rest, ctx),
         "log" => cmds::log(rest, ctx),
+        "check-ignore" => cmds::check_ignore(rest, ctx),
+        "diff" => difftool::diff(rest, ctx),
+        "branch" => checkout::branch(rest, ctx),
+        "checkout" => checkout::checkout(rest, ctx),
+        "status" => status::status(rest, ctx),
         "rev-parse" => cmds::rev_parse(rest, ctx),
         "config" => cmds::config(rest, ctx),
         "help" | "--help" | "-h" => {

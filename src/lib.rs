@@ -13,16 +13,21 @@ compile_error!("nanogit only supports Unix-like systems (it reads POSIX file met
 
 pub mod cli;
 pub mod cmds;
+pub mod checkout;
 pub mod commit;
 pub mod config;
+pub mod diff;
+pub mod difftool;
 pub mod error;
 pub mod history;
+pub mod ignore;
 pub mod index;
 pub mod object;
 pub mod prng;
 pub mod refs;
 pub mod repo;
 pub mod revparse;
+pub mod status;
 pub mod sha1;
 pub mod timefmt;
 pub mod tree;

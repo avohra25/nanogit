@@ -1,5 +1,6 @@
 //! Porcelain commands built on the library modules.
 
+use std::fs;
 use std::io::Write;
 
 use crate::cli::{usage_error, Ctx};
@@ -7,6 +8,7 @@ use crate::commit::clean_message;
 use crate::config::{set_value, Config};
 use crate::error::{Error, Result};
 use crate::history::log as walk_log;
+use crate::ignore::Ignore;
 use crate::object::{Commit, Oid};
 use crate::refs::Head;
 use crate::repo::Repo;
@@ -27,14 +29,15 @@ fn is_option(arg: &str) -> bool {
 
 /// `nanogit add [-A | -u] [--] <path>...`
 pub fn add(args: &[String], ctx: &mut Ctx<'_>) -> Result<i32> {
-    const USAGE: &str = "add [-A | -u] [--] <path>...";
+    const USAGE: &str = "add [-A | -u] [-f] [--] <path>...";
     let (opts, after) = split_dashdash(args);
-    let (mut all, mut update) = (false, false);
+    let (mut all, mut update, mut force) = (false, false, false);
     let mut specs: Vec<String> = after.to_vec();
     for a in opts {
         match a.as_str() {
             "-A" | "--all" => all = true,
             "-u" | "--update" => update = true,
+            "-f" | "--force" => force = true,
             s if is_option(s) => return usage_error(ctx, USAGE),
             s => specs.push(s.to_string()),
         }
@@ -46,12 +49,36 @@ pub fn add(args: &[String], ctx: &mut Ctx<'_>) -> Result<i32> {
     let repo = Repo::discover(ctx.cwd)?;
     let mut index = repo.load_index()?;
     let rels = resolve_specs(&repo, ctx, &specs, all || update)?;
+    let mut refused = Vec::new();
     if update {
         repo.stage_tracked_changes(&mut index)?;
-    } else {
+    } else if force {
         repo.add_paths(&mut index, &rels, None)?;
+    } else {
+        let mut ignore = Ignore::new(&repo);
+        let mut wanted = Vec::new();
+        for rel in rels {
+            let meta = fs::symlink_metadata(repo.abs_path(&rel));
+            let is_dir = meta.as_ref().is_ok_and(|m| m.is_dir());
+            let tracked = if is_dir { index.contains_dir(&rel) } else { index.contains(&rel) };
+            if !rel.is_empty() && meta.is_ok() && !tracked && ignore.is_ignored(&rel, is_dir) {
+                refused.push(rel);
+            } else {
+                wanted.push(rel);
+            }
+        }
+        let mut skip = |p: &str, is_dir: bool| ignore.is_ignored(p, is_dir);
+        repo.add_paths(&mut index, &wanted, Some(&mut skip))?;
     }
     repo.save_index(&index)?;
+    if !refused.is_empty() {
+        writeln!(ctx.err, "The following paths are ignored by one of your .gitignore files:")?;
+        for path in &refused {
+            writeln!(ctx.err, "{path}")?;
+        }
+        writeln!(ctx.err, "hint: Use -f if you really want to add them.")?;
+        return Ok(1);
+    }
     Ok(0)
 }
 
@@ -93,38 +120,96 @@ pub fn rm(args: &[String], ctx: &mut Ctx<'_>) -> Result<i32> {
     Ok(0)
 }
 
-/// `nanogit ls-files [-s] [--] [<path>...]`
+/// `nanogit ls-files [-s] [-c] [-o] [-i] [--exclude-standard] [--] [<path>...]`
 pub fn ls_files(args: &[String], ctx: &mut Ctx<'_>) -> Result<i32> {
-    const USAGE: &str = "ls-files [-s] [--] [<path>...]";
+    const USAGE: &str = "ls-files [-s] [-c] [-o] [-i] [--exclude-standard] [--] [<path>...]";
     let (opts, after) = split_dashdash(args);
-    let mut staged = false;
+    let (mut staged, mut cached, mut others, mut ignored_only, mut exclude) = (false, false, false, false, false);
     let mut specs: Vec<String> = after.to_vec();
     for a in opts {
         match a.as_str() {
             "-s" | "--stage" => staged = true,
-            "-c" | "--cached" => {}
+            "-c" | "--cached" => cached = true,
+            "-o" | "--others" => others = true,
+            "-i" | "--ignored" => ignored_only = true,
+            "--exclude-standard" => exclude = true,
             s if is_option(s) => return usage_error(ctx, USAGE),
             s => specs.push(s.to_string()),
         }
+    }
+    if ignored_only && !others {
+        return usage_error(ctx, USAGE);
     }
     let repo = Repo::discover(ctx.cwd)?;
     let index = repo.load_index()?;
     let prefix = repo.rel_path(ctx.cwd, ".")?;
     let rels = if specs.is_empty() { vec![prefix.clone()] } else { resolve_specs(&repo, ctx, &specs, false)? };
-    let mut last: Option<String> = None;
-    for e in &index.entries {
-        if !rels.iter().any(|s| pathspec_matches(s, &e.path)) {
-            continue;
+    if cached || staged || !others {
+        let mut last: Option<String> = None;
+        for e in &index.entries {
+            if !rels.iter().any(|s| pathspec_matches(s, &e.path)) {
+                continue;
+            }
+            let shown = relative_to(&prefix, &e.path);
+            if staged {
+                writeln!(ctx.out, "{:06o} {} {}\t{shown}", e.mode, e.oid, e.stage)?;
+            } else if last.as_deref() != Some(shown.as_str()) {
+                writeln!(ctx.out, "{shown}")?;
+            }
+            last = Some(shown);
         }
-        let shown = relative_to(&prefix, &e.path);
-        if staged {
-            writeln!(ctx.out, "{:06o} {} {}\t{shown}", e.mode, e.oid, e.stage)?;
-        } else if last.as_deref() != Some(shown.as_str()) {
-            writeln!(ctx.out, "{shown}")?;
+    }
+    if others {
+        let mut ignore = Ignore::new(&repo);
+        let files = {
+            let mut skip = |p: &str, is_dir: bool| !is_dir && index.contains(p);
+            repo.walk_files("", &mut skip)?
+        };
+        for path in files {
+            if !rels.iter().any(|s| pathspec_matches(s, &path)) {
+                continue;
+            }
+            let hidden = ignore.is_ignored(&path, false);
+            if hidden != ignored_only && (exclude || ignored_only) {
+                continue;
+            }
+            writeln!(ctx.out, "{}", relative_to(&prefix, &path))?;
         }
-        last = Some(shown);
     }
     Ok(0)
+}
+
+/// `nanogit check-ignore [-q] <path>...`: print the paths that are ignored.
+pub fn check_ignore(args: &[String], ctx: &mut Ctx<'_>) -> Result<i32> {
+    const USAGE: &str = "check-ignore [-q] <path>...";
+    let (opts, after) = split_dashdash(args);
+    let mut quiet = false;
+    let mut specs: Vec<String> = after.to_vec();
+    for a in opts {
+        match a.as_str() {
+            "-q" | "--quiet" => quiet = true,
+            s if is_option(s) => return usage_error(ctx, USAGE),
+            s => specs.push(s.to_string()),
+        }
+    }
+    if specs.is_empty() {
+        return usage_error(ctx, USAGE);
+    }
+    let repo = Repo::discover(ctx.cwd)?;
+    let index = repo.load_index()?;
+    let mut ignore = Ignore::new(&repo);
+    let mut any = false;
+    for spec in &specs {
+        let rel = repo.rel_path(ctx.cwd, spec)?;
+        let is_dir = fs::symlink_metadata(repo.abs_path(&rel)).is_ok_and(|m| m.is_dir());
+        if !index.contains(&rel) && ignore.is_ignored(&rel, is_dir) {
+            any = true;
+            if !quiet {
+                writeln!(ctx.out, "{spec}")?;
+            }
+        }
+    }
+    Ok(if any { 0 } else { 1 })
 }
 
 /// `nanogit write-tree`
@@ -228,8 +313,9 @@ pub fn write_commit_medium(out: &mut dyn Write, oid: &Oid, c: &Commit) -> Result
 
 /// `nanogit log [--oneline] [-n <N>] [<rev>...]`
 pub fn log(args: &[String], ctx: &mut Ctx<'_>) -> Result<i32> {
-    const USAGE: &str = "log [--oneline] [-n <N>] [<rev>...]";
+    const USAGE: &str = "log [--oneline] [--all] [-n <N>] [<rev>...]";
     let mut oneline = false;
+    let mut all = false;
     let mut limit: Option<usize> = None;
     let mut revs: Vec<String> = Vec::new();
     let mut it = args.iter();
@@ -239,6 +325,7 @@ pub fn log(args: &[String], ctx: &mut Ctx<'_>) -> Result<i32> {
         };
         match a.as_str() {
             "--oneline" => oneline = true,
+            "--all" => all = true,
             "-n" | "--max-count" => {
                 limit = Some(parse(it.next().ok_or_else(|| Error::fatal("option '-n' needs a number"))?)?);
             }
@@ -250,7 +337,12 @@ pub fn log(args: &[String], ctx: &mut Ctx<'_>) -> Result<i32> {
         }
     }
     let repo = Repo::discover(ctx.cwd)?;
-    let starts: Vec<Oid> = if revs.is_empty() {
+    let starts: Vec<Oid> = if all {
+        let mut starts: Vec<Oid> = repo.list_refs("refs/")?.into_iter().map(|(_, oid)| oid).collect();
+        starts.extend(repo.head_oid()?);
+        starts.extend(revs.iter().map(|r| repo.rev_parse(r)).collect::<Result<Vec<_>>>()?);
+        starts
+    } else if revs.is_empty() {
         match repo.head_oid()? {
             Some(oid) => vec![oid],
             None => {

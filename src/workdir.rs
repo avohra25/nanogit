@@ -32,7 +32,11 @@ pub fn relative_to(base: &str, path: &str) -> String {
     let common = b.iter().zip(&p).take_while(|(x, y)| x == y).count();
     let mut parts: Vec<&str> = vec![".."; b.len() - common];
     parts.extend(&p[common..]);
-    parts.join("/")
+    let mut out = parts.join("/");
+    if path.ends_with('/') && !out.is_empty() {
+        out.push('/');
+    }
+    out
 }
 
 /// What lives at a path in the working tree.
@@ -385,6 +389,8 @@ mod tests {
         assert_eq!(relative_to("a", "README"), "../README");
         assert_eq!(relative_to("a/b", "a/c/d"), "../c/d");
         assert_eq!(relative_to("a/b", "x"), "../../x");
+        assert_eq!(relative_to("a", "a/dir/"), "dir/");
+        assert_eq!(relative_to("", "new/"), "new/");
     }
 
     #[test]

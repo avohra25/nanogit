@@ -79,7 +79,7 @@ impl Repo {
         Ok(())
     }
 
-    fn blob_data(&self, entry: &FlatEntry) -> Result<Vec<u8>> {
+    pub(crate) fn blob_data(&self, entry: &FlatEntry) -> Result<Vec<u8>> {
         if entry.mode == mode::GITLINK {
             return Ok(Vec::new());
         }

@@ -139,3 +139,31 @@ pub fn git_stdin(dir: &Path, args: &[&str], stdin: &[u8]) -> Run {
     child.stdin.take().unwrap().write_all(stdin).unwrap();
     Run::from(child.wait_with_output().unwrap())
 }
+
+/// Run real `git` with extra environment variables.
+pub fn git_env(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Run {
+    let mut cmd = Command::new("git");
+    cmd.args(args).current_dir(dir).stdin(Stdio::null());
+    base_env(&mut cmd);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    Run::from(cmd.output().expect("spawn git"))
+}
+
+/// Recursively copy a directory (including `.git`).
+pub fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let (src, dst) = (entry.path(), to.join(entry.file_name()));
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
+            copy_dir(&src, &dst);
+        } else if kind.is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(&src).unwrap(), &dst).unwrap();
+        } else {
+            fs::copy(&src, &dst).unwrap();
+        }
+    }
+}

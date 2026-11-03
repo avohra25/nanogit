@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use crate::checkout;
 use crate::cmds;
+use crate::merge;
+use crate::reset;
 use crate::error::{Error, Result};
 use crate::object::{hash_object, Kind, Object};
 use crate::repo::Repo;
@@ -38,6 +40,9 @@ Commands:
   branch [-v] [<name> [<start>]] | -d/-D <name> | -m [<old>] <new>
   checkout [-f] [-b <new>] [--detach] <branch|commit>  |  checkout [<commit>] -- <path>...
   diff [--cached] [-U<n>] [--name-only | --name-status] [<commit> [<commit>]] [--] [<path>...]
+  merge [--no-ff | --ff-only] [--no-commit] [-m <msg>] <commit>  |  merge --abort
+  merge-base [--all | --is-ancestor] <commit> <commit>
+  reset [--soft | --mixed | --hard] [<commit>] [--] [<path>...]
   write-tree                       write the index as a tree object
   commit [-a] [--allow-empty] -m <message>
   log [--oneline] [--all] [-n <N>] [<rev>...]
@@ -66,6 +71,9 @@ pub fn run(args: &[String], ctx: &mut Ctx<'_>) -> Result<i32> {
         "branch" => checkout::branch(rest, ctx),
         "checkout" => checkout::checkout(rest, ctx),
         "status" => status::status(rest, ctx),
+        "merge" => merge::merge(rest, ctx),
+        "merge-base" => merge::merge_base(rest, ctx),
+        "reset" => reset::reset(rest, ctx),
         "rev-parse" => cmds::rev_parse(rest, ctx),
         "config" => cmds::config(rest, ctx),
         "help" | "--help" | "-h" => {

@@ -76,6 +76,8 @@ pub struct Status {
     pub untracked: Vec<String>,
     /// Conflicted paths.
     pub unmerged: Vec<Unmerged>,
+    /// A merge was started and not yet concluded.
+    pub merging: bool,
 }
 
 fn class(m: u32) -> u8 {
@@ -229,7 +231,8 @@ impl Repo {
         let unstaged = self.worktree_changes(index)?;
         let mut ignore = Ignore::new(self);
         let untracked = self.untracked_paths(index, &mut ignore, "", true)?;
-        Ok(Status { head, unborn, staged, unstaged, untracked, unmerged })
+        let merging = self.git_dir.join("MERGE_HEAD").exists();
+        Ok(Status { head, unborn, staged, unstaged, untracked, unmerged, merging })
     }
 }
 
@@ -320,6 +323,9 @@ pub fn render_long(st: &Status, base: &str, specs: &[String]) -> String {
     if !unmerged.is_empty() {
         out.push_str("You have unmerged paths.\n  (fix conflicts and run \"nanogit commit\")\n");
         out.push_str("  (use \"nanogit merge --abort\" to abort the merge)\n\n");
+    }
+    if st.merging && st.unmerged.is_empty() {
+        out.push_str("All conflicts fixed but you are still merging.\n  (use \"nanogit commit\" to conclude merge)\n\n");
     }
     if !staged.is_empty() {
         out.push_str("Changes to be committed:\n");
@@ -452,6 +458,7 @@ mod tests {
             unstaged: vec![("a".into(), Delta::Modified), ("z".into(), Delta::Deleted)],
             untracked: vec!["u".into(), "dir/".into()],
             unmerged: vec![Unmerged { path: "m".into(), code: "UU", label: "both modified" }],
+            merging: true,
         };
         assert_eq!(
             render_short(&st, None, true, &[]),
@@ -469,6 +476,7 @@ mod tests {
             unstaged: vec![],
             untracked: vec![],
             unmerged: vec![],
+            merging: false,
         };
         assert_eq!(render_long(&clean, "", &[]), "On branch main\nnothing to commit, working tree clean\n");
         let unborn = Status { unborn: true, ..clean };

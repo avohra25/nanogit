@@ -258,10 +258,11 @@ pub fn commit(args: &[String], ctx: &mut Ctx<'_>) -> Result<i32> {
             _ => return usage_error(ctx, USAGE),
         }
     }
-    if messages.is_empty() {
+    let repo = Repo::discover(ctx.cwd)?;
+    let merge_head = repo.merge_head()?;
+    if messages.is_empty() && merge_head.is_none() {
         return Err(Error::fatal("a commit message is required (-m <message>)"));
     }
-    let repo = Repo::discover(ctx.cwd)?;
     let mut index = repo.load_index()?;
     if all {
         repo.stage_tracked_changes(&mut index)?;
@@ -271,7 +272,10 @@ pub fn commit(args: &[String], ctx: &mut Ctx<'_>) -> Result<i32> {
         let list = index.conflicted_paths().join("\n\t");
         return Err(Error::fatal(format!("committing is not possible because you have unmerged files:\n\t{list}")));
     }
-    let message = messages.join("\n\n");
+    let message = match (&merge_head, messages.is_empty()) {
+        (Some(_), true) => repo.merge_msg().unwrap_or_else(|| "Merge commit\n".to_string()),
+        _ => messages.join("\n\n"),
+    };
     if clean_message(&message).is_empty() {
         return Err(Error::fatal("aborting commit due to empty commit message"));
     }
@@ -281,13 +285,15 @@ pub fn commit(args: &[String], ctx: &mut Ctx<'_>) -> Result<i32> {
         Some(t) => t == tree,
         None => index.entries.is_empty(),
     };
-    if unchanged && !allow_empty {
+    if unchanged && !allow_empty && merge_head.is_none() {
         writeln!(ctx.out, "nothing to commit, working tree clean")?;
         return Ok(1);
     }
     let root = repo.head_oid()?.is_none();
     let label = repo.head_label()?;
-    let oid = repo.commit_index(&index, &message, &[])?;
+    let parents: Vec<Oid> = merge_head.into_iter().collect();
+    let oid = repo.commit_index(&index, &message, &parents)?;
+    repo.clear_merge_state()?;
     let subject = clean_message(&message).lines().next().unwrap_or_default().to_string();
     let root_note = if root { " (root-commit)" } else { "" };
     writeln!(ctx.out, "[{label}{root_note} {}] {subject}", oid.short(7))?;

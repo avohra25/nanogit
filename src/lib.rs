@@ -30,6 +30,7 @@ pub mod object;
 pub mod pack;
 pub mod prng;
 pub mod refs;
+pub mod repack;
 pub mod reset;
 pub mod repo;
 pub mod revparse;

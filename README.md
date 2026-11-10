@@ -70,9 +70,25 @@ conflicts are reported with git's `CONFLICT (...)` wording. A merge
 refuses to start over staged changes, or over local changes and untracked
 files it would overwrite.
 
+### Packing
+
+```sh
+nanogit gc                       # pack-refs --all, then repack -d
+nanogit repack -d --window=20 --depth=10
+nanogit pack-refs [--all]        # tags only, or every ref
+```
+
+`repack` gathers every object reachable from refs, `HEAD`, merge state and
+the index, plus whatever is already packed, and writes a single pack with
+delta compression. With `-d` it then deletes the old packs and the loose
+objects the new pack holds; unreachable loose objects are left alone, so a
+repack never loses data. The new pack is re-read and every object re-hashed
+before anything is deleted.
+
 Commands: `init`, `hash-object`, `cat-file`, `add`, `rm`, `ls-files`,
 `check-ignore`, `write-tree`, `commit`, `log`, `status`, `diff`, `branch`,
-`checkout`, `merge`, `merge-base`, `reset`, `rev-parse`, `config`. Run `nanogit help` for flags.
+`checkout`, `merge`, `merge-base`, `reset`, `rev-parse`, `config`, `repack`,
+`pack-refs`, `gc`. Run `nanogit help` for flags.
 
 Author and committer come from `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/
 `GIT_COMMITTER_*` (and `GIT_*_DATE`), falling back to `user.name` and
@@ -85,7 +101,8 @@ zone.
 | --- | --- |
 | `sha1`, `zlib` | SHA-1; inflate (stored, fixed, dynamic Huffman) and a deflate encoder (hash-chain LZ77, fixed Huffman, stored fallback) |
 | `object` | object ids, blobs/trees/commits/tags, the object store (loose objects first, then packs) |
-| `pack`, `delta` | pack index v1/v2 parsing, pack entry decoding with delta-chain resolution and a small base cache, git's copy/insert delta format |
+| `pack`, `delta` | pack index v1/v2 parsing, pack entry decoding with delta-chain resolution and a small base cache, pack + index v2 writing with a sliding delta window, git's copy/insert delta format and a block-hash delta encoder |
+| `repack` | object collection, `repack`, `pack-refs` (peeled, byte-identical to git's) and `gc` |
 | `index` | index v2 reader/writer with stat data and conflict stages |
 | `tree`, `commit`, `refs`, `history`, `revparse` | tree building, commit creation, branches and `HEAD`, log walking, revision parsing |
 | `diff`, `difftool` | Myers O(ND) diff, unified hunks with git's context rules, git-style headers |
@@ -101,7 +118,8 @@ zone.
 - Packfiles are read: objects that `git gc` or `git repack` moved into
   `objects/pack/` (index v1 or v2, `OFS_DELTA` and `REF_DELTA` chains,
   several packs at once) are found transparently, and new objects are
-  still written loose. Packed refs are read; nanogit does not write packs yet.
+  written loose. `repack`, `pack-refs` and `gc` write packs (version 2,
+  `OFS_DELTA`, index v2) and `packed-refs` that git reads back.
 - Unix only (file modes, symlinks and stat data come from `std::os::unix`).
 - Merging uses one merge base (the most recent); there is no recursive
   merge of several bases and **no rename detection**, so a rename plus an

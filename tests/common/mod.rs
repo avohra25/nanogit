@@ -167,3 +167,69 @@ pub fn copy_dir(from: &Path, to: &Path) {
         }
     }
 }
+
+// ------------------------------------------------- shared pack fixtures
+
+/// A small repository with enough history and similar files for git to
+/// produce delta chains, two branches and an annotated tag.
+pub fn history(tag: &str) -> TempDir {
+    let t = TempDir::new(tag);
+    git(t.path(), &["init", "-q", "-b", "main"]).ok();
+    let mut text = String::new();
+    for i in 0..400 {
+        text.push_str(&format!("line {i}: the quick brown fox jumps over the lazy dog\n"));
+    }
+    for round in 0..8 {
+        text = text.replacen(&format!("line {}:", round * 37), &format!("LINE {round} edited:"), 1);
+        text.push_str(&format!("appended in round {round}\n"));
+        t.write("story.txt", &text);
+        t.write(&format!("notes/round{round}.md"), format!("# Round {round}\n\n{}", text.len()));
+        t.write("src/lib.rs", format!("pub const ROUND: u32 = {round};\n{}", "// padding\n".repeat(50)));
+        git(t.path(), &["add", "-A"]).ok();
+        git(t.path(), &["commit", "-q", "-m", &format!("round {round}")]).ok();
+    }
+    git(t.path(), &["branch", "side", "HEAD~3"]).ok();
+    git(t.path(), &["tag", "-a", "v1", "-m", "release v1", "HEAD~1"]).ok();
+    t
+}
+
+pub fn loose_count(t: &TempDir) -> usize {
+    let mut n = 0;
+    for d in fs::read_dir(t.path().join(".git/objects")).unwrap().flatten() {
+        let name = d.file_name().to_string_lossy().into_owned();
+        if name.len() == 2 {
+            n += fs::read_dir(d.path()).unwrap().count();
+        }
+    }
+    n
+}
+
+pub fn pack_count(t: &TempDir) -> usize {
+    fs::read_dir(t.path().join(".git/objects/pack"))
+        .map(|r| r.flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".pack")).count())
+        .unwrap_or(0)
+}
+
+pub fn make_writable(p: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(p, fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+/// Every object git can see must read back identically through nanogit.
+pub fn assert_all_objects_match(t: &TempDir) {
+    let list = git(t.path(), &["rev-list", "--objects", "--all"]).ok();
+    let mut seen = 0;
+    for line in list.lines() {
+        let oid = line.split(' ').next().unwrap();
+        let kind = git(t.path(), &["cat-file", "-t", oid]).ok();
+        let ng_kind = ng(t.path(), &["cat-file", "-t", oid]).ok();
+        assert_eq!(ng_kind, kind, "type of {oid}");
+        let want = git(t.path(), &["cat-file", kind.trim(), oid]);
+        let got = ng(t.path(), &["cat-file", kind.trim(), oid]);
+        assert_eq!(got.code, 0, "{oid}: {}", got.stderr);
+        assert_eq!(got.raw, want.raw, "body of {oid}");
+        seen += 1;
+    }
+    assert!(seen > 30, "expected a decent number of objects, saw {seen}");
+}
+

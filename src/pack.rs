@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::delta;
 use crate::error::{Error, Result};
@@ -425,4 +425,210 @@ pub fn open_all(objects_dir: &Path) -> Result<Vec<Pack>> {
     }
     idxs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     idxs.into_iter().map(|(_, p)| Pack::open(&p)).collect()
+}
+
+// ------------------------------------------------------------------ writing
+
+/// CRC-32 (IEEE, as used by pack indexes and zlib's gzip).
+pub fn crc32(data: &[u8]) -> u32 {
+    static TABLE: OnceLock<[u32; 256]> = OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let mut t = [0u32; 256];
+        for (i, slot) in t.iter_mut().enumerate() {
+            let mut c = i as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
+            }
+            *slot = c;
+        }
+        t
+    });
+    let mut crc = !0u32;
+    for &b in data {
+        crc = table[((crc ^ u32::from(b)) & 0xff) as usize] ^ (crc >> 8);
+    }
+    !crc
+}
+
+/// One object to put in a new pack.
+#[derive(Clone, Debug)]
+pub struct PackInput {
+    /// Object id (must match `kind` + `body`).
+    pub oid: Oid,
+    /// Object type.
+    pub kind: Kind,
+    /// Object body.
+    pub body: Vec<u8>,
+    /// Hash of the path the object was found at, used to group likely delta
+    /// partners (0 when unknown).
+    pub name_hash: u32,
+}
+
+/// Knobs for [`write_pack`], named after `git pack-objects` options.
+#[derive(Clone, Copy, Debug)]
+pub struct PackOptions {
+    /// How many preceding objects to try as delta bases (0 disables deltas).
+    pub window: usize,
+    /// Longest delta chain allowed.
+    pub depth: usize,
+}
+
+impl Default for PackOptions {
+    fn default() -> Self {
+        PackOptions { window: 10, depth: 50 }
+    }
+}
+
+/// What [`write_pack`] produced.
+#[derive(Clone, Debug)]
+pub struct WrittenPack {
+    /// The `.pack` bytes.
+    pub pack: Vec<u8>,
+    /// The `.idx` (version 2) bytes.
+    pub index: Vec<u8>,
+    /// The pack checksum; the files are named `pack-<checksum>.*`.
+    pub checksum: [u8; 20],
+    /// How many objects were stored as deltas.
+    pub deltas: usize,
+}
+
+/// git's `pack_name_hash`: weights the last characters of a path so files
+/// with the same name or extension sort next to each other.
+pub fn name_hash(path: &str) -> u32 {
+    let mut hash = 0u32;
+    for c in path.bytes() {
+        if c.is_ascii_whitespace() {
+            continue;
+        }
+        hash = (hash >> 2).wrapping_add(u32::from(c) << 24);
+    }
+    hash
+}
+
+fn entry_header(code: u8, size: usize, out: &mut Vec<u8>) {
+    let mut n = size >> 4;
+    let mut c = (code << 4) | (size & 0x0f) as u8;
+    while n != 0 {
+        out.push(c | 0x80);
+        c = (n & 0x7f) as u8;
+        n >>= 7;
+    }
+    out.push(c);
+}
+
+fn ofs_encoding(mut rel: u64) -> Vec<u8> {
+    let mut bytes = vec![(rel & 0x7f) as u8];
+    rel >>= 7;
+    while rel != 0 {
+        rel -= 1;
+        bytes.push(0x80 | (rel & 0x7f) as u8);
+        rel >>= 7;
+    }
+    bytes.reverse();
+    bytes
+}
+
+/// Build a version 2 pack (with `OFS_DELTA` entries) and its version 2 index.
+///
+/// Objects are ordered by type, path hash and descending size, as git does,
+/// so each object can only use an earlier one as its delta base; every
+/// candidate in the window is tried and the smallest delta wins, provided it
+/// is less than half the object's size and keeps the chain within `depth`.
+pub fn write_pack(mut objects: Vec<PackInput>, opts: PackOptions) -> WrittenPack {
+    objects.sort_by(|a, b| a.oid.cmp(&b.oid));
+    objects.dedup_by(|a, b| a.oid == b.oid);
+    objects.sort_by(|a, b| {
+        type_code(a.kind)
+            .cmp(&type_code(b.kind))
+            .then(a.name_hash.cmp(&b.name_hash))
+            .then(b.body.len().cmp(&a.body.len()))
+            .then(a.oid.cmp(&b.oid))
+    });
+    let n = objects.len();
+    let mut pack = Vec::new();
+    pack.extend_from_slice(b"PACK");
+    pack.extend_from_slice(&2u32.to_be_bytes());
+    pack.extend_from_slice(&(n as u32).to_be_bytes());
+    let mut offsets = vec![0u64; n];
+    let mut depths = vec![0usize; n];
+    let mut crcs = vec![0u32; n];
+    let mut delta_count = 0;
+    for i in 0..n {
+        let obj = &objects[i];
+        let mut best: Option<(usize, Vec<u8>)> = None;
+        if obj.body.len() >= 32 {
+            let limit = obj.body.len() / 2;
+            for j in (i.saturating_sub(opts.window)..i).rev() {
+                let cand = &objects[j];
+                if cand.kind != obj.kind || depths[j] >= opts.depth || cand.body.len() < obj.body.len() / 4 {
+                    continue;
+                }
+                let d = delta::encode(&cand.body, &obj.body);
+                let bound = best.as_ref().map_or(limit, |(_, b)| b.len());
+                if d.len() < bound {
+                    best = Some((j, d));
+                }
+            }
+        }
+        offsets[i] = pack.len() as u64;
+        let start = pack.len();
+        match best {
+            Some((j, d)) => {
+                entry_header(entry::OFS_DELTA, d.len(), &mut pack);
+                pack.extend_from_slice(&ofs_encoding(offsets[i] - offsets[j]));
+                pack.extend_from_slice(&crate::zlib::zlib_compress(&d));
+                depths[i] = depths[j] + 1;
+                delta_count += 1;
+            }
+            None => {
+                entry_header(type_code(obj.kind), obj.body.len(), &mut pack);
+                pack.extend_from_slice(&crate::zlib::zlib_compress(&obj.body));
+            }
+        }
+        crcs[i] = crc32(&pack[start..]);
+    }
+    let checksum = sha1(&pack);
+    pack.extend_from_slice(&checksum);
+
+    // Index v2: fan-out, sorted ids, CRCs, 31-bit offsets, large offsets.
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| objects[a].oid.cmp(&objects[b].oid));
+    let mut idx = Vec::new();
+    idx.extend_from_slice(b"\xfftOc");
+    idx.extend_from_slice(&2u32.to_be_bytes());
+    let mut fan = [0u32; 256];
+    for o in &objects {
+        fan[usize::from(o.oid.as_bytes()[0])] += 1;
+    }
+    let mut running = 0u32;
+    for f in fan.iter_mut() {
+        running += *f;
+        *f = running;
+    }
+    for f in fan {
+        idx.extend_from_slice(&f.to_be_bytes());
+    }
+    for &k in &order {
+        idx.extend_from_slice(objects[k].oid.as_bytes());
+    }
+    for &k in &order {
+        idx.extend_from_slice(&crcs[k].to_be_bytes());
+    }
+    let mut large = Vec::new();
+    for &k in &order {
+        let off = offsets[k];
+        if off < 0x8000_0000 {
+            idx.extend_from_slice(&(off as u32).to_be_bytes());
+        } else {
+            idx.extend_from_slice(&(0x8000_0000 | large.len() as u32).to_be_bytes());
+            large.push(off);
+        }
+    }
+    for off in large {
+        idx.extend_from_slice(&off.to_be_bytes());
+    }
+    idx.extend_from_slice(&checksum);
+    let idx_sum = sha1(&idx);
+    idx.extend_from_slice(&idx_sum);
+    WrittenPack { pack, index: idx, checksum, deltas: delta_count }
 }

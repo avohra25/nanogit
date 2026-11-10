@@ -272,3 +272,79 @@ fn conflicting_edits_keep_both_versions_in_markers() {
         assert_eq!(outside.as_bytes(), join(&base).as_slice(), "seed {seed}");
     }
 }
+
+/// Byte-level edits: splices of random data, deletions and duplications.
+fn edit_bytes(rng: &mut Rng, data: &[u8]) -> Vec<u8> {
+    let mut out = data.to_vec();
+    for _ in 0..rng.range(0, 12) {
+        let at = if out.is_empty() { 0 } else { rng.below(out.len() as u64 + 1) as usize };
+        match rng.below(3) {
+            0 => {
+                let n = rng.range(1, 60) as usize;
+                let ins = rng.bytes(n);
+                out.splice(at..at, ins);
+            }
+            1 => {
+                let end = (at + rng.range(1, 500) as usize).min(out.len());
+                out.drain(at..end);
+            }
+            _ => {
+                let end = (at + rng.range(1, 300) as usize).min(out.len());
+                let copy = out[at..end].to_vec();
+                out.extend(copy);
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn deltas_rebuild_their_targets() {
+    use nanogit::delta;
+    for seed in 0..300 {
+        let mut rng = Rng::new(9000 + seed);
+        let base = sample(&mut rng);
+        let target = if rng.chance(15) { sample(&mut rng) } else { edit_bytes(&mut rng, &base) };
+        let d = delta::encode(&base, &target);
+        assert_eq!(delta::sizes(&d).unwrap(), (base.len() as u64, target.len() as u64), "seed {seed}");
+        assert_eq!(delta::apply(&base, &d).unwrap(), target, "seed {seed}");
+        // Truncating a delta must be detected, never panic.
+        if d.len() > 3 {
+            let cut = rng.range(1, d.len() as u64) as usize;
+            let _ = delta::apply(&base, &d[..cut]);
+        }
+    }
+}
+
+#[test]
+fn written_packs_read_back() {
+    use nanogit::pack::{write_pack, Pack, PackIndex, PackInput, PackOptions};
+    for seed in 0..40 {
+        let mut rng = Rng::new(7700 + seed);
+        let mut objects = Vec::new();
+        let mut prev = sample(&mut rng);
+        for _ in 0..rng.range(1, 25) {
+            let body = if rng.chance(70) { edit_bytes(&mut rng, &prev) } else { sample(&mut rng) };
+            let kind = *rng.pick(&[Kind::Blob, Kind::Blob, Kind::Blob, Kind::Tag]);
+            let oid = hash_object(kind, &body);
+            objects.push(PackInput { oid, kind, body: body.clone(), name_hash: rng.below(3) as u32 });
+            prev = body;
+        }
+        let opts = PackOptions { window: rng.range(0, 12) as usize, depth: rng.range(1, 6) as usize };
+        let written = write_pack(objects.clone(), opts);
+        let index = PackIndex::parse(&written.index).unwrap();
+        let pack = Pack::from_parts("mem.pack".into(), written.pack.clone(), index).unwrap();
+        let none = |o: &nanogit::object::Oid| -> nanogit::error::Result<(Kind, Vec<u8>)> {
+            panic!("seed {seed}: unexpected external base {o}")
+        };
+        for o in &objects {
+            let (kind, body) = pack.read(&o.oid, &none).expect("present").unwrap();
+            assert_eq!((kind, &body), (o.kind, &o.body), "seed {seed}");
+        }
+        // Any single flipped byte in the index is caught by its checksum.
+        let mut bad = written.index.clone();
+        let at = rng.below(bad.len() as u64) as usize;
+        bad[at] ^= 1 << rng.below(8);
+        assert!(PackIndex::parse(&bad).is_err(), "seed {seed}");
+    }
+}

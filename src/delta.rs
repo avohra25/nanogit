@@ -103,6 +103,104 @@ pub fn apply(base: &[u8], delta: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+fn write_size(mut n: usize, out: &mut Vec<u8>) {
+    loop {
+        let b = (n & 0x7f) as u8;
+        n >>= 7;
+        if n == 0 {
+            out.push(b);
+            return;
+        }
+        out.push(b | 0x80);
+    }
+}
+
+/// Block size used to index the base; matches shorter than this are not
+/// worth a copy instruction.
+const BLOCK: usize = 16;
+/// Largest copy a single instruction carries (git's own encoder limit).
+const MAX_COPY: usize = 0x10000;
+
+fn flush_insert(lit: &[u8], out: &mut Vec<u8>) {
+    for chunk in lit.chunks(127) {
+        out.push(chunk.len() as u8);
+        out.extend_from_slice(chunk);
+    }
+}
+
+fn push_copy(mut offset: usize, mut len: usize, out: &mut Vec<u8>) {
+    while len > 0 {
+        let n = len.min(MAX_COPY);
+        let at = out.len();
+        out.push(0x80);
+        let mut op = 0x80u8;
+        for i in 0..4 {
+            let b = (offset >> (8 * i)) as u8;
+            if b != 0 {
+                op |= 1 << i;
+                out.push(b);
+            }
+        }
+        let size = if n == MAX_COPY { 0 } else { n };
+        for i in 0..3 {
+            let b = (size >> (8 * i)) as u8;
+            if b != 0 {
+                op |= 0x10 << i;
+                out.push(b);
+            }
+        }
+        out[at] = op;
+        offset += n;
+        len -= n;
+    }
+}
+
+/// Encode `target` as a delta against `base`.
+///
+/// The base is indexed in non-overlapping 16-byte blocks; the target is
+/// scanned byte by byte, and every block hit is extended backwards (into the
+/// pending literal run) and forwards as far as the bytes agree.  The result
+/// always round-trips through [`apply`], though it is not guaranteed to be
+/// the smallest possible delta.
+pub fn encode(base: &[u8], target: &[u8]) -> Vec<u8> {
+    use std::collections::HashMap;
+    let mut out = Vec::new();
+    write_size(base.len(), &mut out);
+    write_size(target.len(), &mut out);
+    // Base offsets are limited to 32 bits by the copy instruction.
+    let usable = base.len().min(u32::MAX as usize);
+    let mut blocks: HashMap<&[u8], usize> = HashMap::new();
+    let mut i = 0;
+    while i + BLOCK <= usable {
+        blocks.entry(&base[i..i + BLOCK]).or_insert(i);
+        i += BLOCK;
+    }
+    let mut lit_start = 0;
+    let mut p = 0;
+    while p + BLOCK <= target.len() {
+        let Some(&b) = blocks.get(&target[p..p + BLOCK]) else {
+            p += 1;
+            continue;
+        };
+        // Extend backwards over the literal run, then forwards.
+        let (mut bs, mut ts) = (b, p);
+        while bs > 0 && ts > lit_start && base[bs - 1] == target[ts - 1] {
+            bs -= 1;
+            ts -= 1;
+        }
+        let mut len = p + BLOCK - ts;
+        while bs + len < usable && ts + len < target.len() && base[bs + len] == target[ts + len] {
+            len += 1;
+        }
+        flush_insert(&target[lit_start..ts], &mut out);
+        push_copy(bs, len, &mut out);
+        p = ts + len;
+        lit_start = p;
+    }
+    flush_insert(&target[lit_start..], &mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +238,29 @@ mod tests {
         size(0x10000, &mut d);
         d.push(0x80);
         assert_eq!(apply(&base, &d).unwrap(), base);
+    }
+
+    #[test]
+    fn encode_round_trips() {
+        let base: Vec<u8> = (0..5000u32).flat_map(|i| format!("line {i}\n").into_bytes()).collect();
+        let mut target = base.clone();
+        target.splice(1000..1010, b"inserted text here".iter().copied());
+        target.truncate(30_000);
+        target.extend_from_slice(b"tail");
+        let d = encode(&base, &target);
+        assert!(d.len() < target.len() / 10, "delta of {} bytes", d.len());
+        assert_eq!(apply(&base, &d).unwrap(), target);
+        for (b, t) in [(&b""[..], &b""[..]), (b"abc", b""), (b"", b"xyz"), (b"same", b"same")] {
+            assert_eq!(apply(b, &encode(b, t)).unwrap(), t);
+        }
+    }
+
+    #[test]
+    fn long_copies_are_split() {
+        let base = vec![3u8; 200_000];
+        let d = encode(&base, &base);
+        assert_eq!(apply(&base, &d).unwrap(), base);
+        assert!(d.len() < 40);
     }
 
     #[test]

@@ -51,6 +51,8 @@ Commands:
   repack [-d] [--window=<n>] [--depth=<n>]  pack all objects (with deltas) into one pack
   pack-refs [--all]                move tags (or all refs) into packed-refs
   gc [--aggressive] [-q]           pack-refs --all, then repack -d
+  verify-pack [-v | -s] <pack>.idx...  check a pack; -v lists its entries
+  count-objects [-v]               count loose and packed objects
 ";
 
 /// Run one command line and return the process exit code.
@@ -82,6 +84,8 @@ pub fn run(args: &[String], ctx: &mut Ctx<'_>) -> Result<i32> {
         "repack" => crate::repack::cmd_repack(rest, ctx),
         "pack-refs" => crate::repack::cmd_pack_refs(rest, ctx),
         "gc" => crate::repack::cmd_gc(rest, ctx),
+        "verify-pack" => crate::packinfo::cmd_verify_pack(rest, ctx),
+        "count-objects" => crate::packinfo::cmd_count_objects(rest, ctx),
         "help" | "--help" | "-h" => {
             write!(ctx.out, "{USAGE}")?;
             Ok(0)

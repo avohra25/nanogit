@@ -28,6 +28,7 @@ pub mod index;
 pub mod merge;
 pub mod object;
 pub mod pack;
+pub mod packinfo;
 pub mod prng;
 pub mod refs;
 pub mod repack;

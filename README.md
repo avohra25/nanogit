@@ -17,7 +17,8 @@ cargo test            # unit tests plus integration tests against real git
 ```
 
 The integration tests shell out to `git` to cross-check nanogit's output
-byte for byte (objects, commits, merge commits, `status`, `diff`, ignore decisions, `reset`). They
+byte for byte (objects, commits, merge commits, `status`, `diff`, ignore decisions, `reset`,
+packs, `packed-refs`, `verify-pack` and `count-objects`). They
 skip themselves with a note when `git` is not installed.
 
 ## Usage
@@ -76,6 +77,8 @@ files it would overwrite.
 nanogit gc                       # pack-refs --all, then repack -d
 nanogit repack -d --window=20 --depth=10
 nanogit pack-refs [--all]        # tags only, or every ref
+nanogit verify-pack -v .git/objects/pack/pack-*.idx
+nanogit count-objects -v
 ```
 
 `repack` gathers every object reachable from refs, `HEAD`, merge state and
@@ -85,10 +88,17 @@ objects the new pack holds; unreachable loose objects are left alone, so a
 repack never loses data. The new pack is re-read and every object re-hashed
 before anything is deleted.
 
+`verify-pack` checks a pack end to end (pack and index checksums, entries
+tiling the file exactly, every CRC, every object resolving to the id the
+index names) and with `-v` lists each entry with its size, packed size,
+offset, chain length and base, followed by the chain-length histogram, in
+the same format as `git verify-pack -v`. `count-objects -v` reports loose,
+packed, prune-packable and garbage counts the way git does.
+
 Commands: `init`, `hash-object`, `cat-file`, `add`, `rm`, `ls-files`,
 `check-ignore`, `write-tree`, `commit`, `log`, `status`, `diff`, `branch`,
 `checkout`, `merge`, `merge-base`, `reset`, `rev-parse`, `config`, `repack`,
-`pack-refs`, `gc`. Run `nanogit help` for flags.
+`pack-refs`, `gc`, `verify-pack`, `count-objects`. Run `nanogit help` for flags.
 
 Author and committer come from `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/
 `GIT_COMMITTER_*` (and `GIT_*_DATE`), falling back to `user.name` and
@@ -103,6 +113,7 @@ zone.
 | `object` | object ids, blobs/trees/commits/tags, the object store (loose objects first, then packs) |
 | `pack`, `delta` | pack index v1/v2 parsing, pack entry decoding with delta-chain resolution and a small base cache, pack + index v2 writing with a sliding delta window, git's copy/insert delta format and a block-hash delta encoder |
 | `repack` | object collection, `repack`, `pack-refs` (peeled, byte-identical to git's) and `gc` |
+| `packinfo` | full pack verification, `verify-pack` and `count-objects` |
 | `index` | index v2 reader/writer with stat data and conflict stages |
 | `tree`, `commit`, `refs`, `history`, `revparse` | tree building, commit creation, branches and `HEAD`, log walking, revision parsing |
 | `diff`, `difftool` | Myers O(ND) diff, unified hunks with git's context rules, git-style headers |
@@ -135,8 +146,13 @@ zone.
 - Unit tests per module (SHA-1/zlib known vectors, diff, merge, ignore, status).
 - `tests/git_*.rs` run nanogit and real git on copies of the same repository
   and compare commit ids, index contents, work trees and command output.
+- `tests/git_packs.rs`, `git_repack.rs` and `git_packinfo.rs` read packs
+  git wrote (after `gc --aggressive`, with `REF_DELTA`s, index v1, several
+  packs, deliberate corruption) and have git read, fsck and clone what
+  nanogit packs.
 - `tests/randomized.rs` uses a seeded PRNG: `inflate(deflate(x)) == x`,
-  patch round-trips, clean and symmetric merges of non-overlapping edits,
+  `apply(base, encode(base, x)) == x` for deltas, packs written and read
+  back with random windows and depths, patch round-trips, clean and symmetric merges of non-overlapping edits,
   SHA-1 against `git hash-object`.
 
 ## License

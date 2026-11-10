@@ -1,6 +1,6 @@
 [package]
 name = "nanogit"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A Git-compatible mini version control system written from scratch in Rust (std only)"
 license = "MIT"

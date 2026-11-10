@@ -3,14 +3,18 @@
 //! Every object is stored as `zlib("<kind> <size>\0<body>")` in
 //! `objects/xx/yyyy...`, named by the SHA-1 of the uncompressed bytes.  That is
 //! exactly git's loose format, so the two tools can share a repository.
+//! Objects that git has moved into packfiles (`objects/pack/`, e.g. after
+//! `git gc`) are found there when no loose copy exists.
 
 use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use crate::error::{Error, Result};
+use crate::pack::{self, Pack};
 use crate::sha1::{from_hex, sha1, to_hex};
 use crate::zlib::{zlib_compress, zlib_decompress};
 
@@ -461,10 +465,11 @@ fn frame(kind: Kind, body: &[u8]) -> Vec<u8> {
     data
 }
 
-/// The `objects/` directory of a repository.
+/// The `objects/` directory of a repository: loose objects plus packs.
 #[derive(Clone, Debug)]
 pub struct ObjectStore {
     dir: PathBuf,
+    packs: Arc<OnceLock<std::result::Result<Vec<Pack>, String>>>,
 }
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -472,7 +477,74 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 impl ObjectStore {
     /// Open the store rooted at `objects_dir`.
     pub fn new(objects_dir: impl Into<PathBuf>) -> ObjectStore {
-        ObjectStore { dir: objects_dir.into() }
+        ObjectStore { dir: objects_dir.into(), packs: Arc::new(OnceLock::new()) }
+    }
+
+    /// The packs under `objects/pack/`, opened on first use.
+    pub fn packs(&self) -> Result<&[Pack]> {
+        match self.packs.get_or_init(|| pack::open_all(&self.dir).map_err(|e| e.to_string())) {
+            Ok(p) => Ok(p),
+            Err(msg) => Err(Error::corrupt(msg.clone())),
+        }
+    }
+
+    /// Forget the opened packs so the next lookup rescans `objects/pack/`.
+    pub fn reload_packs(&mut self) {
+        self.packs = Arc::new(OnceLock::new());
+    }
+
+    /// Whether the object exists as a loose file.
+    pub fn contains_loose(&self, oid: &Oid) -> bool {
+        self.path_of(oid).is_file()
+    }
+
+    /// Every loose object id, sorted.
+    pub fn loose_oids(&self) -> Result<Vec<Oid>> {
+        let mut out = Vec::new();
+        let Ok(top) = fs::read_dir(&self.dir) else { return Ok(out) };
+        for d in top.flatten() {
+            let dname = d.file_name().to_string_lossy().into_owned();
+            if dname.len() != 2 || !d.path().is_dir() {
+                continue;
+            }
+            for f in fs::read_dir(d.path())?.flatten() {
+                let fname = f.file_name().to_string_lossy().into_owned();
+                if fname.len() == 38 {
+                    if let Some(oid) = Oid::from_hex(&format!("{dname}{fname}")) {
+                        out.push(oid);
+                    }
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    /// Read an object from the packs only (used for delta bases too).
+    fn read_packed(&self, oid: &Oid, depth: usize) -> Result<Option<(Kind, Vec<u8>)>> {
+        if depth > 64 {
+            return Err(Error::corrupt(format!("delta bases of {oid} cross packs too deeply")));
+        }
+        let external = |base: &Oid| -> Result<(Kind, Vec<u8>)> {
+            if self.contains_loose(base) {
+                return self.read_loose(base);
+            }
+            self.read_packed(base, depth + 1)?
+                .ok_or_else(|| Error::corrupt(format!("delta base {base} of {oid} is missing")))
+        };
+        for p in self.packs()? {
+            if let Some(found) = p.read(oid, &external) {
+                let (kind, body) = found?;
+                if hash_object(kind, &body) != *oid {
+                    return Err(Error::corrupt(format!(
+                        "object {oid} in {} has the wrong hash",
+                        p.path.display()
+                    )));
+                }
+                return Ok(Some((kind, body)));
+            }
+        }
+        Ok(None)
     }
 
     fn path_of(&self, oid: &Oid) -> PathBuf {
@@ -480,9 +552,10 @@ impl ObjectStore {
         self.dir.join(&hex[..2]).join(&hex[2..])
     }
 
-    /// Whether the object exists as a loose file.
+    /// Whether the object exists, loose or packed.
     pub fn contains(&self, oid: &Oid) -> bool {
-        self.path_of(oid).is_file()
+        self.contains_loose(oid)
+            || self.packs().map(|ps| ps.iter().any(|p| p.contains(oid))).unwrap_or(false)
     }
 
     /// Store an object body and return its id (a no-op if already present).
@@ -490,7 +563,7 @@ impl ObjectStore {
         let data = frame(kind, body);
         let oid = Oid(sha1(&data));
         let path = self.path_of(&oid);
-        if path.is_file() {
+        if path.is_file() || self.packs().map(|ps| ps.iter().any(|p| p.contains(&oid))).unwrap_or(false) {
             return Ok(oid);
         }
         let parent = path.parent().unwrap_or(&self.dir);
@@ -511,12 +584,22 @@ impl ObjectStore {
         self.write(obj.kind(), &obj.serialize())
     }
 
-    /// Read an object's type and body.
+    /// Read an object's type and body (loose first, then packs).
     pub fn read_raw(&self, oid: &Oid) -> Result<(Kind, Vec<u8>)> {
+        if self.contains_loose(oid) {
+            return self.read_loose(oid);
+        }
+        match self.read_packed(oid, 0)? {
+            Some(found) => Ok(found),
+            None => Err(Error::fatal(format!("object {oid} not found"))),
+        }
+    }
+
+    fn read_loose(&self, oid: &Oid) -> Result<(Kind, Vec<u8>)> {
         let path = self.path_of(oid);
         let packed = fs::read(&path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                Error::fatal(format!("object {oid} not found (packfiles are not supported)"))
+                Error::fatal(format!("object {oid} not found"))
             } else {
                 Error::Io(e)
             }
@@ -568,6 +651,11 @@ impl ObjectStore {
                 }
             }
         }
+        for p in self.packs()? {
+            found.extend(p.index.with_prefix(prefix));
+        }
+        found.sort();
+        found.dedup();
         match found.len() {
             0 => Err(Error::fatal(format!("no object matches '{prefix}'"))),
             1 => Ok(found[0]),

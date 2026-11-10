@@ -84,7 +84,8 @@ zone.
 | Module | Purpose |
 | --- | --- |
 | `sha1`, `zlib` | SHA-1; inflate (stored, fixed, dynamic Huffman) and a deflate encoder (hash-chain LZ77, fixed Huffman, stored fallback) |
-| `object` | object ids, blobs/trees/commits/tags, the loose object store |
+| `object` | object ids, blobs/trees/commits/tags, the object store (loose objects first, then packs) |
+| `pack`, `delta` | pack index v1/v2 parsing, pack entry decoding with delta-chain resolution and a small base cache, git's copy/insert delta format |
 | `index` | index v2 reader/writer with stat data and conflict stages |
 | `tree`, `commit`, `refs`, `history`, `revparse` | tree building, commit creation, branches and `HEAD`, log walking, revision parsing |
 | `diff`, `difftool` | Myers O(ND) diff, unified hunks with git's context rules, git-style headers |
@@ -97,8 +98,10 @@ zone.
 
 ## Compatibility notes
 
-- Loose objects only (no packfiles, no packed refs writing); reading
-  repositories that have packed objects is not supported.
+- Packfiles are read: objects that `git gc` or `git repack` moved into
+  `objects/pack/` (index v1 or v2, `OFS_DELTA` and `REF_DELTA` chains,
+  several packs at once) are found transparently, and new objects are
+  still written loose. Packed refs are read; nanogit does not write packs yet.
 - Unix only (file modes, symlinks and stat data come from `std::os::unix`).
 - Merging uses one merge base (the most recent); there is no recursive
   merge of several bases and **no rename detection**, so a rename plus an

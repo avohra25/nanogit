@@ -3,7 +3,9 @@
 //! The crate is dependency-free (std only).  The pieces, bottom-up:
 //!
 //! * [`sha1`] and [`zlib`] - hashing and compression primitives.
-//! * [`object`] - blobs, trees, commits, tags and the loose object store.
+//! * [`object`] - blobs, trees, commits, tags and the object store (loose
+//!   objects plus packfiles).
+//! * [`pack`] and [`delta`] - packfile/index reading and git's delta format.
 //! * [`repo`] - repository layout (`.git/`), discovery and revision parsing.
 //! * [`cli`] - the `nanogit` command line.
 //! * [`prng`] - a seeded generator used by the randomized tests.
@@ -16,6 +18,7 @@ pub mod cmds;
 pub mod checkout;
 pub mod commit;
 pub mod config;
+pub mod delta;
 pub mod diff;
 pub mod difftool;
 pub mod error;
@@ -24,6 +27,7 @@ pub mod ignore;
 pub mod index;
 pub mod merge;
 pub mod object;
+pub mod pack;
 pub mod prng;
 pub mod refs;
 pub mod reset;

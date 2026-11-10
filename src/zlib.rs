@@ -304,6 +304,13 @@ pub fn inflate(data: &[u8]) -> Result<Vec<u8>> {
 
 /// Decode a zlib stream (RFC 1950), verifying the Adler-32 trailer.
 pub fn zlib_decompress(data: &[u8]) -> Result<Vec<u8>> {
+    zlib_decompress_prefix(data).map(|(out, _)| out)
+}
+
+/// Decode a zlib stream that may be followed by unrelated bytes (as inside a
+/// packfile).  Returns the decoded data and how many input bytes the stream
+/// used, trailer included.
+pub fn zlib_decompress_prefix(data: &[u8]) -> Result<(Vec<u8>, usize)> {
     if data.len() < 2 {
         return Err(ZlibError::UnexpectedEof);
     }
@@ -321,7 +328,7 @@ pub fn zlib_decompress(data: &[u8]) -> Result<Vec<u8>> {
     if want != adler32(&out) {
         return Err(ZlibError::ChecksumMismatch);
     }
-    Ok(out)
+    Ok((out, at + 4))
 }
 
 // ---------------------------------------------------------------- deflate
